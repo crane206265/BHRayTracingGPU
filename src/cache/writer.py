@@ -1,5 +1,7 @@
 # writer.py
 
+from pathlib import Path
+
 import h5py
 import jax
 import numpy as np
@@ -7,6 +9,10 @@ import numpy as np
 
 class RayHistoryWriter:
     def __init__(self, path):
+        path = Path(path).expanduser()
+        if not path.is_absolute():
+            path = Path(__file__).resolve().parents[2] / "cache" / path
+        path.parent.mkdir(parents=True, exist_ok=True)
         self.file = h5py.File(path, "x")
         self.file.attrs["format_version"] = 1
         self.file.attrs["history_includes_initial"] = False

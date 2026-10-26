@@ -1,0 +1,11 @@
+/*
+!/.gitignore
+!/README.md
+!/pyproject.toml
+!/requirements*.txt
+!/src/
+/src/**
+!/src/**/
+!/src/**/*.py
+__pycache__/
+*.py[cod]

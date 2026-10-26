@@ -74,7 +74,7 @@ init_state = initialize_state(
     params = BHparams,
     r_escape = r_escape,
     event_fn = event_fn,
-    safe_y = [0, 0, 0, 0]# 뭘로 채워야 좋을까
+    safe_y = safe_y
 )
 
 rhs = rhs_func(kerr_schild.metric_contra)
