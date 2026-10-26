@@ -1,5 +1,7 @@
 /*
 !/.gitignore
+!/.gitattributes
+!/run_trace_kerr.sbatch
 !/README.md
 !/pyproject.toml
 !/requirements*.txt
