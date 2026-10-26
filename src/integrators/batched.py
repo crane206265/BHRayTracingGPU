@@ -6,7 +6,7 @@ import jax.numpy as jnp
 from src.types import IntegrationState, RayStatus
 
 
-def integrate_chunk_func(rk4_step, event_single, n_steps):
+def integrate_chunk_func(rk4_step, event_single, n_steps, compute_step_size):
     """
     Build a JIT-compiled batched RK4 integrator.
 
@@ -57,7 +57,12 @@ def integrate_chunk_func(rk4_step, event_single, n_steps):
 
     rk4_batch = jax.vmap(
         rk4_step,
-        in_axes=(0, None, None)
+        in_axes=(0, 0, None)
+    )
+
+    step_size_batch = jax.vmap(
+        compute_step_size,
+        in_axes=(0, None, None),
     )
 
     event_batch = jax.vmap(
@@ -80,15 +85,40 @@ def integrate_chunk_func(rk4_step, event_single, n_steps):
                 safe_state
             )
 
+            h_batch = step_size_batch(safe_y, params, h)
+            proposed_lam = carry.lam + h_batch
+            finite_step = jnp.isfinite(h_batch) & jnp.isfinite(proposed_lam)
+            progress = (h_batch < 0) & (proposed_lam < carry.lam)
+            attempt = carry.active & finite_step & progress
+
+            rk_input = jnp.where(attempt[:, None], safe_y, safe_state)
+            rk_h = jnp.where(attempt, h_batch, jnp.zeros_like(h_batch))
             proposed_y = rk4_batch(
-                safe_y, h, params
+                rk_input,
+                rk_h,
+                params
             )
 
             finite = jnp.all(jnp.isfinite(proposed_y), axis=1)
             event_status = event_batch(
                 proposed_y, params, r_escape, safe_state
             )
-            valid_step = carry.active & finite
+            event_status = jnp.where(
+                ~finite_step | ~finite,
+                int(RayStatus.NONFINITE),
+                jnp.where(
+                    ~progress,
+                    int(RayStatus.INVALID),
+                    event_status
+                )
+            )
+            valid_step = attempt & finite
+
+            next_lam = jnp.where(
+                valid_step,
+                proposed_lam,
+                carry.lam
+            )
 
             next_y = jnp.where(
                 valid_step[:, None],
@@ -96,14 +126,8 @@ def integrate_chunk_func(rk4_step, event_single, n_steps):
                 carry.y
             )
 
-            next_lam = jnp.where(
-                valid_step,
-                carry.lam + h,
-                carry.lam
-            )
-
             next_active = (
-                carry.active
+                valid_step
                 & (event_status == int(RayStatus.ACTIVE))
             )
             next_status = jnp.where(

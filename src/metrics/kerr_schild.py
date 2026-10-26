@@ -62,7 +62,7 @@ def radial_coordinate(x, params):
 
     return jnp.sqrt(r2)
 
-def capture_fn(x, params):
+def capture_fn(x, params, epsilon=0.01):
     # Kerr BH Horizon
     M = params.M
     a = params.a
@@ -71,4 +71,4 @@ def capture_fn(x, params):
 
     r_plus = M + jnp.sqrt(M**2 - a**2)
 
-    return r <= r_plus
+    return r <= r_plus + epsilon*M

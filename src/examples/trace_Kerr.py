@@ -1,6 +1,7 @@
 # trace_Kerr.py
 
 import argparse
+from functools import partial
 
 import jax
 jax.config.update("jax_enable_x64", True)
@@ -16,6 +17,7 @@ from src.integrators.rk4 import rk4_step_func
 from src.integrators.batched import integrate_chunk_func
 from src.hamiltonian import rhs_func
 from src.cache.writer import RayHistoryWriter
+from src.integrators.step_size import adaptive_step_size_func
 
 
 parser = argparse.ArgumentParser(description="Trace Kerr photon geodesics and save their history.")
@@ -27,6 +29,7 @@ parser.add_argument("--freq", type=float, default=1.0)
 parser.add_argument("--fov", type=float, default=20.0, help="Field of view in degrees.")
 parser.add_argument("--ppd", type=float, default=0.25, help="Pixels per degree; image width is int(fov * ppd).")
 parser.add_argument("--escape-factor", type=float, default=2.0)
+parser.add_argument("--epsilon", type=float, default=0.01, help="Dimensionless capture margin: r_stop = r_plus + epsilon * mass; zero selects the horizon.")
 parser.add_argument("--h", type=float, default=-0.01)
 parser.add_argument("--chunk-steps", type=int, default=256)
 parser.add_argument("--max-chunks", type=int, default=100)
@@ -46,6 +49,8 @@ if not 0 < args.fov < 180 or args.ppd <= 0 or int(args.fov * args.ppd) < 1:
     parser.error("Require 0 < fov < 180, ppd > 0, and at least one pixel per axis.")
 if args.escape_factor <= 1 or args.h >= 0:
     parser.error("Require escape-factor > 1 and h < 0.")
+if args.epsilon < 0:
+    parser.error("Epsilon must be nonnegative.")
 if args.chunk_steps < 1 or args.max_chunks < 1:
     parser.error("Chunk steps and max chunks must be positive integers.")
 
@@ -99,7 +104,9 @@ r_escape = jnp.full(
 )
 safe_y = jnp.zeros((8,), dtype=y0.dtype)
 safe_y = safe_y.at[1].set(100.0 * BHparams.M)
-event_fn = event_single_func(kerr_schild.capture_fn)
+event_fn = event_single_func(
+    partial(kerr_schild.capture_fn, epsilon=args.epsilon)
+)
 
 init_state = initialize_state(
     y0 = y0,
@@ -111,10 +118,15 @@ init_state = initialize_state(
 
 rhs = rhs_func(kerr_schild.metric_contra)
 rk4 = rk4_step_func(rhs)
+step_size_fn = adaptive_step_size_func(
+    rhs,
+    kerr_schild.radial_coordinate
+)
 integrate_chunk = integrate_chunk_func(
     rk4_step = rk4,
     event_single = event_fn,
-    n_steps = MAX_STEPS
+    n_steps = MAX_STEPS,
+    compute_step_size=step_size_fn
 )
 
 with RayHistoryWriter(args.output) as writer:

@@ -33,6 +33,7 @@ FREQ="${FREQ:-1.0}"
 FOV="${FOV:-20.0}"
 PPD="${PPD:-0.25}"
 ESCAPE_FACTOR="${ESCAPE_FACTOR:-2.0}"
+EPSILON="${EPSILON:-0.01}"
 H="${H:--0.01}"
 CHUNK_STEPS="${CHUNK_STEPS:-256}"
 MAX_CHUNKS="${MAX_CHUNKS:-100}"
@@ -51,6 +52,7 @@ python -u -m src.examples.trace_Kerr \
     --fov="$FOV" \
     --ppd="$PPD" \
     --escape-factor="$ESCAPE_FACTOR" \
+    --epsilon="$EPSILON" \
     --h="$H" \
     --chunk-steps="$CHUNK_STEPS" \
     --max-chunks="$MAX_CHUNKS" \
