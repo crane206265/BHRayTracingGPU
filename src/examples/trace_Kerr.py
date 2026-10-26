@@ -30,6 +30,8 @@ parser.add_argument("--fov", type=float, default=20.0, help="Field of view in de
 parser.add_argument("--ppd", type=float, default=0.25, help="Pixels per degree; image width is int(fov * ppd).")
 parser.add_argument("--escape-factor", type=float, default=2.0)
 parser.add_argument("--epsilon", type=float, default=0.01, help="Dimensionless capture margin: r_stop = r_plus + epsilon * mass; zero selects the horizon.")
+parser.add_argument("--cache-dense-radius", type=float, default=30.0, help="Save every valid step at or below this Kerr radius, in code length units.")
+parser.add_argument("--cache-outer-interval", type=float, default=1.0, help="Absolute affine interval for outer sampling; retain samples crossing each interval boundary.")
 parser.add_argument("--h", type=float, default=-0.01)
 parser.add_argument("--chunk-steps", type=int, default=256)
 parser.add_argument("--max-chunks", type=int, default=100)
@@ -51,6 +53,8 @@ if args.escape_factor <= 1 or args.h >= 0:
     parser.error("Require escape-factor > 1 and h < 0.")
 if args.epsilon < 0:
     parser.error("Epsilon must be nonnegative.")
+if args.cache_dense_radius < 0 or args.cache_outer_interval <= 0:
+    parser.error("Require cache-dense-radius >= 0 and cache-outer-interval > 0.")
 if args.chunk_steps < 1 or args.max_chunks < 1:
     parser.error("Chunk steps and max chunks must be positive integers.")
 
@@ -129,7 +133,15 @@ integrate_chunk = integrate_chunk_func(
     compute_step_size=step_size_fn
 )
 
-with RayHistoryWriter(args.output) as writer:
+cache_radius_fn = jax.jit(jax.vmap(
+    partial(kerr_schild.radial_coordinate, params=BHparams)
+))
+with RayHistoryWriter(
+    args.output,
+    radius_fn=cache_radius_fn,
+    dense_radius=args.cache_dense_radius,
+    outer_interval=args.cache_outer_interval,
+) as writer:
     parameters = writer.file.create_group("parameters")
     for name, value in vars(args).items():
         parameters.attrs[name] = value

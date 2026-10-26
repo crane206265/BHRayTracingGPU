@@ -34,6 +34,8 @@ FOV="${FOV:-20.0}"
 PPD="${PPD:-0.25}"
 ESCAPE_FACTOR="${ESCAPE_FACTOR:-2.0}"
 EPSILON="${EPSILON:-0.01}"
+CACHE_DENSE_RADIUS="${CACHE_DENSE_RADIUS:-30.0}"
+CACHE_OUTER_INTERVAL="${CACHE_OUTER_INTERVAL:-1.0}"
 H="${H:--0.01}"
 CHUNK_STEPS="${CHUNK_STEPS:-256}"
 MAX_CHUNKS="${MAX_CHUNKS:-100}"
@@ -53,6 +55,8 @@ python -u -m src.examples.trace_Kerr \
     --ppd="$PPD" \
     --escape-factor="$ESCAPE_FACTOR" \
     --epsilon="$EPSILON" \
+    --cache-dense-radius="$CACHE_DENSE_RADIUS" \
+    --cache-outer-interval="$CACHE_OUTER_INTERVAL" \
     --h="$H" \
     --chunk-steps="$CHUNK_STEPS" \
     --max-chunks="$MAX_CHUNKS" \
