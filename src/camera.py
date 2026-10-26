@@ -44,7 +44,8 @@ class KerrSchildCamera:
             -beta / alpha
         ])
 
-        coeff = -1.0 / (1.0 + jnp.sqrt(1.0 + 2 * H))
+        s = jnp.sqrt(1.0 + 2 * H)
+        coeff = -1.0 / (s * (1.0 + s))
         E = jnp.eye(3, dtype=g.dtype) + coeff * A
 
         tetrad = jnp.zeros((4, 4), dtype=g.dtype)
