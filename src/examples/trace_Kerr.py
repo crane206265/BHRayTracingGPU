@@ -1,5 +1,7 @@
 # trace_Kerr.py
 
+import argparse
+
 import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
@@ -16,19 +18,49 @@ from src.hamiltonian import rhs_func
 from src.cache.writer import RayHistoryWriter
 
 
-BHparams = KerrParams(M=1.0, a=0.0)
+parser = argparse.ArgumentParser(description="Trace Kerr photon geodesics and save their history.")
+parser.add_argument("--mass", type=float, default=1.0)
+parser.add_argument("--spin", type=float, default=0.0, help="Dimensional Kerr parameter a; abs(a) <= mass.")
+parser.add_argument("--radius", type=float, default=50.0, help="Euclidean observer distance in code units.")
+parser.add_argument("--inc", type=float, default=60.0, help="Observer inclination in degrees.")
+parser.add_argument("--freq", type=float, default=1.0)
+parser.add_argument("--fov", type=float, default=20.0, help="Field of view in degrees.")
+parser.add_argument("--ppd", type=float, default=0.25, help="Pixels per degree; image width is int(fov * ppd).")
+parser.add_argument("--escape-factor", type=float, default=2.0)
+parser.add_argument("--h", type=float, default=-0.01)
+parser.add_argument("--chunk-steps", type=int, default=256)
+parser.add_argument("--max-chunks", type=int, default=100)
+parser.add_argument("--output", default="rays.h5", help="Filename relative to repository cache/, or an absolute path.")
+args = parser.parse_args()
 
-R = 50.0
-inc = 60.0
-freq = 1.0
+numeric_values = [value for value in vars(args).values() if isinstance(value, (int, float))]
+if not np.isfinite(numeric_values).all():
+    parser.error("Numeric parameters must be finite.")
+if args.mass <= 0 or abs(args.spin) > args.mass:
+    parser.error("Require mass > 0 and abs(spin) <= mass.")
+if args.radius <= 0 or args.freq <= 0:
+    parser.error("Radius and frequency must be positive.")
+if not 0 < args.inc < 180:
+    parser.error("Require 0 < inc < 180; the current screen basis excludes the poles.")
+if not 0 < args.fov < 180 or args.ppd <= 0 or int(args.fov * args.ppd) < 1:
+    parser.error("Require 0 < fov < 180, ppd > 0, and at least one pixel per axis.")
+if args.escape_factor <= 1 or args.h >= 0:
+    parser.error("Require escape-factor > 1 and h < 0.")
+if args.chunk_steps < 1 or args.max_chunks < 1:
+    parser.error("Chunk steps and max chunks must be positive integers.")
 
-FOV = 20.0
-PPD = 0.25
+print("Parameters:", vars(args), flush=True)
 
-r_esc_R = 2.0
-h = -0.01
-MAX_STEPS = 256
-MAX_CHUNKS = 100
+BHparams = KerrParams(M=args.mass, a=args.spin)
+R = args.radius
+inc = args.inc
+freq = args.freq
+FOV = args.fov
+PPD = args.ppd
+r_esc_R = args.escape_factor
+h = args.h
+MAX_STEPS = args.chunk_steps
+MAX_CHUNKS = args.max_chunks
 
 # --------------------------
 
@@ -85,7 +117,10 @@ integrate_chunk = integrate_chunk_func(
     n_steps = MAX_STEPS
 )
 
-with RayHistoryWriter("rays.h5") as writer:
+with RayHistoryWriter(args.output) as writer:
+    parameters = writer.file.create_group("parameters")
+    for name, value in vars(args).items():
+        parameters.attrs[name] = value
     writer.write_initial(init_state)
 
     final_state = integrate(
