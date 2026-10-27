@@ -6,7 +6,7 @@
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:pro6000:1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=8G
+#SBATCH --mem=16G
 #SBATCH --time=00:30:00
 #SBATCH --output=slurm-%j.out
 
@@ -30,15 +30,17 @@ SPIN="${SPIN:-0.0}"
 RADIUS="${RADIUS:-50.0}"
 INC="${INC:-60.0}"
 FREQ="${FREQ:-1.0}"
-FOV="${FOV:-20.0}"
-PPD="${PPD:-0.25}"
+FOV="${FOV:-16.0}"
+PPD="${PPD:-8.0}"
 ESCAPE_FACTOR="${ESCAPE_FACTOR:-2.0}"
 EPSILON="${EPSILON:-0.01}"
 CACHE_DENSE_RADIUS="${CACHE_DENSE_RADIUS:-30.0}"
 CACHE_OUTER_INTERVAL="${CACHE_OUTER_INTERVAL:-1.0}"
 H="${H:--0.01}"
-CHUNK_STEPS="${CHUNK_STEPS:-256}"
-MAX_CHUNKS="${MAX_CHUNKS:-100}"
+FAR_H_MAX="${FAR_H_MAX:-0.5}"
+STEP_GROWTH_RADIUS="${STEP_GROWTH_RADIUS:-30.0}"
+CHUNK_STEPS="${CHUNK_STEPS:-64}"
+MAX_CHUNKS="${MAX_CHUNKS:-400}"
 OUTPUT="${OUTPUT:-rays_${SLURM_JOB_ID}.h5}"
 
 hostname
@@ -58,6 +60,8 @@ python -u -m src.examples.trace_Kerr \
     --cache-dense-radius="$CACHE_DENSE_RADIUS" \
     --cache-outer-interval="$CACHE_OUTER_INTERVAL" \
     --h="$H" \
+    --far-h-max="$FAR_H_MAX" \
+    --step-growth-radius="$STEP_GROWTH_RADIUS" \
     --chunk-steps="$CHUNK_STEPS" \
     --max-chunks="$MAX_CHUNKS" \
     --output="$OUTPUT"

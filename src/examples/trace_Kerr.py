@@ -33,6 +33,8 @@ parser.add_argument("--epsilon", type=float, default=0.01, help="Dimensionless c
 parser.add_argument("--cache-dense-radius", type=float, default=30.0, help="Save every valid step at or below this Kerr radius, in code length units.")
 parser.add_argument("--cache-outer-interval", type=float, default=1.0, help="Absolute affine interval for outer sampling; retain samples crossing each interval boundary.")
 parser.add_argument("--h", type=float, default=-0.01)
+parser.add_argument("--far-h-max", type=float, default=0.5, help="Positive maximum affine step magnitude in the far region.")
+parser.add_argument("--step-growth-radius", type=float, default=30.0, help="Kerr radius where the step cap starts growing; reaches far-h-max at twice this radius.")
 parser.add_argument("--chunk-steps", type=int, default=256)
 parser.add_argument("--max-chunks", type=int, default=100)
 parser.add_argument("--output", default="rays.h5", help="Filename relative to repository cache/, or an absolute path.")
@@ -51,6 +53,8 @@ if not 0 < args.fov < 180 or args.ppd <= 0 or int(args.fov * args.ppd) < 1:
     parser.error("Require 0 < fov < 180, ppd > 0, and at least one pixel per axis.")
 if args.escape_factor <= 1 or args.h >= 0:
     parser.error("Require escape-factor > 1 and h < 0.")
+if args.far_h_max < abs(args.h) or args.step_growth_radius <= 0:
+    parser.error("Require far-h-max >= abs(h) and step-growth-radius > 0.")
 if args.epsilon < 0:
     parser.error("Epsilon must be nonnegative.")
 if args.cache_dense_radius < 0 or args.cache_outer_interval <= 0:
@@ -124,7 +128,9 @@ rhs = rhs_func(kerr_schild.metric_contra)
 rk4 = rk4_step_func(rhs)
 step_size_fn = adaptive_step_size_func(
     rhs,
-    kerr_schild.radial_coordinate
+    kerr_schild.radial_coordinate,
+    far_h_max=args.far_h_max,
+    growth_radius=args.step_growth_radius,
 )
 integrate_chunk = integrate_chunk_func(
     rk4_step = rk4,

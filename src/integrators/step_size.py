@@ -1,5 +1,7 @@
 # step_size.py
 
+import math
+
 import jax
 import jax.numpy as jnp
 
@@ -9,7 +11,14 @@ def simple_step_size(y, params, h):
     return jnp.asarray(h, dtype=y.dtype)
 
 
-def adaptive_step_size_func(rhs, radial_coordinate):
+def adaptive_step_size_func(rhs, radial_coordinate, *, far_h_max=None, growth_radius=30.0):
+    growth_radius = float(growth_radius)
+    if not math.isfinite(growth_radius) or growth_radius <= 0:
+        raise ValueError("growth_radius must be finite and positive.")
+    if far_h_max is not None:
+        far_h_max = float(far_h_max)
+        if not math.isfinite(far_h_max) or far_h_max <= 0:
+            raise ValueError("far_h_max must be finite and positive.")
 
     grad_r = jax.grad(radial_coordinate, argnums=0)
 
@@ -53,8 +62,14 @@ def adaptive_step_size_func(rhs, radial_coordinate):
             / jnp.maximum(pdot_norm, 1e-14)
         )
 
+        h_cap = jnp.abs(h_max)
+        if far_h_max is not None:
+            growth = jnp.clip((r - growth_radius) / growth_radius, 0.0, 1.0)
+            far_cap = jnp.maximum(h_cap, far_h_max)
+            h_cap = h_cap + growth * (far_cap - h_cap)
+
         h_abs = jnp.minimum(
-            jnp.abs(h_max),
+            h_cap,
             jnp.minimum(
                 h_geom,
                 jnp.minimum(h_horizon, h_mom)
