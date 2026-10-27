@@ -7,7 +7,7 @@
 #SBATCH --gres=gpu:pro6000:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
-#SBATCH --time=00:30:00
+#SBATCH --time=02:00:00
 #SBATCH --output=slurm-%j.out
 
 set -eo pipefail
@@ -31,11 +31,14 @@ RADIUS="${RADIUS:-50.0}"
 INC="${INC:-60.0}"
 FREQ="${FREQ:-1.0}"
 FOV="${FOV:-16.0}"
-PPD="${PPD:-16.0}"
+PPD="${PPD:-24.0}"
 ESCAPE_FACTOR="${ESCAPE_FACTOR:-2.0}"
 EPSILON="${EPSILON:-0.01}"
 CACHE_DENSE_RADIUS="${CACHE_DENSE_RADIUS:-30.0}"
 CACHE_OUTER_INTERVAL="${CACHE_OUTER_INTERVAL:-1.0}"
+CACHE_HISTORY_MODE="${CACHE_HISTORY_MODE:-omit_captured_no_hit}"
+TRACE_BATCH_SIZE="${TRACE_BATCH_SIZE:-512}"
+CACHE_DISK_R_OUT_M="${CACHE_DISK_R_OUT_M:-20.0}"
 H="${H:--0.01}"
 FAR_H_MAX="${FAR_H_MAX:-0.5}"
 STEP_GROWTH_RADIUS="${STEP_GROWTH_RADIUS:-30.0}"
@@ -59,6 +62,9 @@ python -u -m src.examples.trace_Kerr \
     --epsilon="$EPSILON" \
     --cache-dense-radius="$CACHE_DENSE_RADIUS" \
     --cache-outer-interval="$CACHE_OUTER_INTERVAL" \
+    --cache-history-mode="$CACHE_HISTORY_MODE" \
+    --trace-batch-size="$TRACE_BATCH_SIZE" \
+    --cache-disk-r-out-m="$CACHE_DISK_R_OUT_M" \
     --h="$H" \
     --far-h-max="$FAR_H_MAX" \
     --step-growth-radius="$STEP_GROWTH_RADIUS" \

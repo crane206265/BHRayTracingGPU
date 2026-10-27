@@ -2,10 +2,14 @@
 
 from operator import index
 from pathlib import Path
+from uuid import uuid4
 
 import h5py
 import jax
+import jax.numpy as jnp
 import numpy as np
+
+from src.types import IntegrationState, RayStatus
 
 
 class RayHistoryWriter:
@@ -19,11 +23,14 @@ class RayHistoryWriter:
         outer_interval = float(outer_interval)
         if not np.isfinite(outer_interval) or outer_interval <= 0:
             raise ValueError("outer_interval must be finite and positive.")
-        path = Path(path).expanduser()
-        if not path.is_absolute():
-            path = Path(__file__).resolve().parents[2] / "cache" / path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self.file = h5py.File(path, "x")
+        if isinstance(path, h5py.File):
+            self.file = path
+        else:
+            path = Path(path).expanduser()
+            if not path.is_absolute():
+                path = Path(__file__).resolve().parents[2] / "cache" / path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self.file = h5py.File(path, "x")
         self.file.attrs["format_version"] = 2
         self.file.attrs["history_includes_initial"] = False
         self._radius_fn = radius_fn
@@ -218,3 +225,197 @@ class RayHistoryWriter:
             final.create_dataset(name, data=array)
         self.file.flush()
         self._finalized = True
+
+
+class SelectiveRayHistoryWriter(RayHistoryWriter):
+    """
+    Terminal-state filtering with one CPU-memory ray batch at a time
+
+    Parameters
+    ----------
+    disk_hit_fn : callable
+        disk_hit_fn(x0, x1) -> boolean mask; positions: (segments, 4)
+    disk_geometry : mapping
+        plane, mass, spin, r_in, r_out for the omission decision
+
+    Notes
+    -----
+    Omission rule: CAPTURED & no disk intersection on accepted segments
+    Sampling: RayHistoryWriter, unchanged
+    Buffer: in-memory HDF5, backing_store=False
+    Final layout: format 3, packed ray blocks
+    """
+
+    def __init__(self, path, *, disk_hit_fn, disk_geometry, **sampling):
+        geometry = dict(disk_geometry)
+        required = {"plane", "mass", "spin", "r_in", "r_out"}
+        if not required <= geometry.keys() or geometry["plane"] != "z=0":
+            raise ValueError("Selective caching requires an aligned z=0 disk geometry.")
+        M, a, r_in, r_out = (float(geometry[key]) for key in ("mass", "spin", "r_in", "r_out"))
+        if not np.isfinite([M, a, r_in, r_out]).all() or M <= 0 or abs(a) > M or not 0 < r_in < r_out:
+            raise ValueError("Invalid selective-cache disk parameters.")
+        if not callable(disk_hit_fn):
+            raise TypeError("disk_hit_fn must be callable.")
+        super().__init__(path, **sampling)
+        self.file.attrs["format_version"] = 3
+        self.file.attrs["cache_history_mode"] = "omit_captured_no_hit"
+        self.file.create_group("disk_geometry").attrs.update(geometry)
+        self._disk_hit_fn = disk_hit_fn
+        self._batch_open = False
+        self._sampling = dict(sampling)
+
+    def write_initial(self, state):
+        super().write_initial(state)
+        arrays = self._state_arrays(state)
+        self._initial_arrays = {name: value.copy() for name, value in arrays.items()}
+        self._final_arrays = {name: value.copy() for name, value in arrays.items()}
+        self._committed = np.zeros(self._batch_size, dtype=bool)
+        history = self.file["history"]
+        history.create_dataset("omitted", data=np.zeros(self._batch_size, dtype=bool))
+        reason = history.create_dataset("omission_reason", data=np.zeros(self._batch_size, dtype=np.uint8))
+        reason.attrs["codes"] = "0=retained; 1=captured_without_disk_hit"
+        history.create_dataset("disk_hit", data=np.zeros(self._batch_size, dtype=bool))
+        history.create_dataset("unfiltered_saved_length", data=np.zeros(self._batch_size, dtype=np.int64))
+        self.file.flush()
+
+    def save_chunk(self, chunk_idx, history):
+        raise RuntimeError("Selective caching requires writer.batch(...).save_chunk().")
+
+    def batch(self, ray_ids, initial_state):
+        self._require_open()
+        if self._batch_size is None or self._finalized:
+            raise RuntimeError("Write the initial state before opening an unfinished ray batch.")
+        if self._batch_open:
+            raise RuntimeError("Only one buffered trace batch may be open at a time.")
+        ids = np.asarray(ray_ids)
+        if ids.ndim != 1 or not len(ids) or not np.issubdtype(ids.dtype, np.integer):
+            raise ValueError("ray_ids must be a nonempty integer vector.")
+        if np.any(np.diff(ids) <= 0) or ids[0] < 0 or ids[-1] >= self._batch_size:
+            raise ValueError("ray_ids must be sorted, unique, and within the initial batch.")
+        ids = ids.astype(np.int64)
+        if self._committed[ids].any():
+            raise RuntimeError("A ray batch cannot be committed twice.")
+        arrays = self._state_arrays(initial_state)
+        if arrays["y"].shape[0] != len(ids) or any(
+            arrays[name].dtype != value.dtype
+            or not np.array_equal(arrays[name], value[ids], equal_nan=True)
+            for name, value in self._initial_arrays.items()
+        ):
+            raise ValueError("Batch initial state does not match the corresponding global rays.")
+        self._batch_open = True
+        try:
+            return _BufferedRayBatch(self, ids, initial_state)
+        except Exception:
+            self._batch_open = False
+            raise
+
+    def _commit_batch(self, pending, final_state):
+        self._require_open()
+        arrays = self._state_arrays(final_state)
+        ids = pending.ray_ids
+        if arrays["y"].shape[0] != len(ids) or arrays["active"].any():
+            raise ValueError("Every buffered ray must have a terminal state before commit.")
+        pending.writer.write_final(final_state)
+        group = pending.writer.file["history"]
+        lengths = group["saved_length"][:]
+        omitted = (arrays["status"] == int(RayStatus.CAPTURED)) & ~pending.disk_hit
+        keep = ~omitted
+        kept_lengths = np.where(keep, lengths, 0)
+        n = int(kept_lengths.sum())
+        starts = np.cumsum(kept_lengths, dtype=np.int64) - kept_lengths
+        cursors = np.zeros(len(ids), dtype=np.int64)
+        y = np.empty((n, 8), dtype=group["y"].dtype)
+        lam = np.empty(n, dtype=group["lam"].dtype)
+        steps = np.empty(n, dtype=np.int64)
+        for offsets in group["block_offsets"]:
+            counts = np.diff(offsets)
+            local_ids = np.repeat(np.arange(len(ids)), counts)
+            selected = keep[local_ids]
+            if not selected.any():
+                continue
+            first, last = int(offsets[0]), int(offsets[-1])
+            within = np.arange(last - first) - np.repeat(offsets[:-1] - first, counts)
+            destinations = (starts[local_ids] + cursors[local_ids] + within)[selected]
+            y[destinations] = group["y"][first:last][selected]
+            lam[destinations] = group["lam"][first:last][selected]
+            steps[destinations] = group["step"][first:last][selected]
+            cursors += np.where(keep, counts, 0)
+        if not np.array_equal(cursors, kept_lengths):
+            raise RuntimeError("Buffered sample counts are inconsistent.")
+        global_counts = np.zeros(self._batch_size, dtype=np.int64)
+        global_counts[ids] = kept_lengths
+        self._append_records(y, lam, steps, global_counts)
+        history = self.file["history"]
+        history["omitted"][ids] = omitted
+        history["omission_reason"][ids] = omitted.astype(np.uint8)
+        history["disk_hit"][ids] = pending.disk_hit
+        history["unfiltered_saved_length"][ids] = lengths
+        history.attrs.modify("integrated_steps", max(
+            int(history.attrs["integrated_steps"]), int(group.attrs["integrated_steps"])
+        ))
+        self._valid_steps[ids] = arrays["valid_length"]
+        for name, value in arrays.items():
+            self._final_arrays[name][ids] = value
+        self._committed[ids] = True
+        self.file.flush()
+
+    def write_final(self, state=None):
+        self._require_open()
+        if self._batch_size is None or self._finalized or self._batch_open or not self._committed.all():
+            raise RuntimeError("All ray batches must be committed and closed before finalization.")
+        arrays = self._state_arrays(state) if state is not None else self._final_arrays
+        if arrays["y"].shape[0] != self._batch_size or any(
+            arrays[name].dtype != value.dtype
+            or not np.array_equal(arrays[name], value, equal_nan=True)
+            for name, value in self._final_arrays.items()
+        ):
+            raise ValueError("Final state differs from the committed ray results.")
+        final = self.file.create_group("final")
+        for name, array in arrays.items():
+            final.create_dataset(name, data=array)
+        self.file.flush()
+        self._finalized = True
+
+
+class _BufferedRayBatch:
+    def __init__(self, owner, ray_ids, initial_state):
+        self.owner = owner
+        self.ray_ids = ray_ids
+        memory_file = h5py.File(f"ray-buffer-{uuid4().hex}", "w", driver="core", backing_store=False)
+        try:
+            self.writer = RayHistoryWriter(memory_file, **owner._sampling)
+            self.writer.write_initial(initial_state)
+        except Exception:
+            memory_file.close()
+            raise
+        self.disk_hit = np.zeros(len(ray_ids), dtype=bool)
+        self._previous_x = jnp.asarray(initial_state.y[:, :4])
+        self._committed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            self.writer.close()
+        finally:
+            self.owner._batch_open = False
+        if exc_type is None and not self._committed:
+            raise RuntimeError("Buffered ray batch closed without committing its terminal state.")
+
+    def save_chunk(self, chunk_idx, history):
+        if self._committed:
+            raise RuntimeError("Cannot append to a committed ray batch.")
+        y, _, valid = history
+        x0 = jnp.concatenate((self._previous_x[None, ...], y[:-1, :, :4]), axis=0)
+        hits = self.owner._disk_hit_fn(x0.reshape(-1, 4), y[..., :4].reshape(-1, 4))
+        hits = jnp.asarray(hits).reshape(valid.shape) & valid
+        self.disk_hit |= np.asarray(jax.device_get(jnp.any(hits, axis=0)))
+        self.writer.save_chunk(chunk_idx, history)
+        self._previous_x = y[-1, :, :4]
+
+    def commit(self, final_state):
+        if self._committed:
+            raise RuntimeError("A buffered ray batch cannot be committed twice.")
+        self.owner._commit_batch(self, final_state)
+        self._committed = True

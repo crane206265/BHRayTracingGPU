@@ -3,7 +3,7 @@ from operator import index
 import h5py
 import numpy as np
 
-from src.types import IntegrationState
+from src.types import IntegrationState, RayStatus
 
 
 class RayHistoryReader:
@@ -31,7 +31,7 @@ class RayHistoryReader:
 
     def _validate_layout(self):
         self._format_version = int(self.file.attrs.get("format_version", -1))
-        if self._format_version not in (1, 2):
+        if self._format_version not in (1, 2, 3):
             raise ValueError("Unsupported ray history format version.")
         if self.file.attrs.get("history_includes_initial", True):
             raise ValueError("History must exclude the initial sample.")
@@ -82,6 +82,69 @@ class RayHistoryReader:
                 raise ValueError("Packed samples are missing block offsets.")
             if int(history.attrs.get("integrated_steps", -1)) < 0:
                 raise ValueError("Missing integrated step count.")
+            if self._format_version == 3:
+                self._validate_selective_layout()
+
+    def _validate_selective_layout(self):
+        if self.file.attrs.get("cache_history_mode") != "omit_captured_no_hit":
+            raise ValueError("Unknown selective cache mode.")
+        if "final" not in self.file or "disk_geometry" not in self.file:
+            raise ValueError("Selective cache is missing final states or disk geometry.")
+        geometry = dict(self.file["disk_geometry"].attrs)
+        required = {"plane", "mass", "spin", "r_in", "r_out"}
+        if not required <= geometry.keys() or geometry["plane"] != "z=0":
+            raise ValueError("Invalid selective-cache disk geometry.")
+        M, a, r_in, r_out = (float(geometry[key]) for key in ("mass", "spin", "r_in", "r_out"))
+        if not np.isfinite([M, a, r_in, r_out]).all() or M <= 0 or abs(a) > M or not 0 < r_in < r_out:
+            raise ValueError("Invalid selective-cache disk parameters.")
+        history = self.file["history"]
+        required = ("omitted", "omission_reason", "disk_hit", "unfiltered_saved_length")
+        for name in required:
+            if name not in history or history[name].shape != (self._batch_size,):
+                raise ValueError(f"Missing or invalid selective metadata: {name}.")
+        for name in ("omitted", "disk_hit"):
+            if history[name].dtype != np.dtype("bool"):
+                raise ValueError(f"Selective {name} must be boolean.")
+        for name in ("omission_reason", "unfiltered_saved_length", "saved_length"):
+            if not np.issubdtype(history[name].dtype, np.integer):
+                raise ValueError(f"Selective {name} must contain integers.")
+        omitted = history["omitted"][:]
+        disk_hit = history["disk_hit"][:]
+        reasons = history["omission_reason"][:]
+        saved = history["saved_length"][:]
+        unfiltered = history["unfiltered_saved_length"][:]
+        initial, final = self.read_initial(), self.read_final()
+        eligible = (final.status == int(RayStatus.CAPTURED)) & ~disk_hit
+        integrated = final.valid_length.astype(np.int64) - initial.valid_length.astype(np.int64)
+        if final.active.any() or not np.array_equal(omitted, eligible):
+            raise ValueError("Omitted histories do not match terminal CAPTURED/no-hit states.")
+        if not np.array_equal(reasons, omitted.astype(reasons.dtype)):
+            raise ValueError("Unknown or inconsistent history omission reason.")
+        if np.any(unfiltered < 0) or np.any(unfiltered > integrated):
+            raise ValueError("Unfiltered saved lengths exceed accepted integration lengths.")
+        if np.any(saved[omitted] != 0) or not np.array_equal(saved[~omitted], unfiltered[~omitted]):
+            raise ValueError("Stored sample counts disagree with selective history metadata.")
+
+    @property
+    def history_omitted(self):
+        self._require_open()
+        if self._format_version == 3:
+            return self.file["history/omitted"][:]
+        return np.zeros(self._batch_size, dtype=bool)
+
+    @property
+    def unfiltered_saved_lengths(self):
+        self._require_open()
+        if self._format_version == 3:
+            return self.file["history/unfiltered_saved_length"][:]
+        return self.saved_lengths
+
+    @property
+    def disk_geometry(self):
+        self._require_open()
+        if self._format_version == 3:
+            return dict(self.file["disk_geometry"].attrs)
+        return None
 
     @property
     def format_version(self):
@@ -103,21 +166,21 @@ class RayHistoryReader:
     @property
     def n_samples(self):
         self._require_open()
-        if self._format_version == 2:
+        if self._format_version >= 2:
             return self.file["history/y"].shape[0]
         return int(self.saved_lengths.sum())
 
     @property
     def n_blocks(self):
         self._require_open()
-        if self._format_version != 2:
-            raise RuntimeError("Packed blocks are available only in format version 2.")
+        if self._format_version == 1:
+            raise RuntimeError("Packed blocks require format version 2 or 3.")
         return self.file["history/block_offsets"].shape[0]
 
     @property
     def saved_lengths(self):
         self._require_open()
-        if self._format_version == 2:
+        if self._format_version >= 2:
             return self.file["history/saved_length"][:]
         if self.has_final:
             return self.file["final/valid_length"][:].astype(np.int64) - self.file["initial/valid_length"][:].astype(np.int64)
@@ -153,7 +216,7 @@ class RayHistoryReader:
     def read_history(self, start, stop):
         self._require_open()
         if self._format_version != 1:
-            raise RuntimeError("Format version 2 is variable length; use read_ray() or read_block().")
+            raise RuntimeError("Format versions 2 and 3 are variable length; use read_ray() or read_block().")
         start, stop = index(start), index(stop)
         if not 0 <= start <= stop <= self.n_steps:
             raise ValueError("Expected 0 <= start <= stop <= n_steps.")
@@ -177,6 +240,8 @@ class RayHistoryReader:
         ray_id = index(ray_id)
         if not 0 <= ray_id < self._batch_size:
             raise ValueError("Ray index is out of range.")
+        if self._format_version == 3 and self.file["history/omitted"][ray_id]:
+            raise RuntimeError("History intentionally omitted: CAPTURED without a disk hit; inspect final state and omission metadata.")
         group = self.file["history"]
         ys, lams, steps = [], [], []
         if include_initial:

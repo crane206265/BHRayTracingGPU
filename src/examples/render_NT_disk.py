@@ -68,9 +68,20 @@ with RayHistoryReader(cache_path) as reader:
     r_out = 20*M
     mdot = 1
 
+    omitted = reader.history_omitted
+    geometry = reader.disk_geometry
+    if geometry is not None:
+        expected = [float(M), float(a), float(r_in), float(r_out)]
+        cached = [float(geometry[key]) for key in ("mass", "spin", "r_in", "r_out")]
+        if geometry["plane"] != "z=0" or not np.allclose(cached, expected, rtol=1e-12, atol=0.0):
+            raise ValueError("Selective cache disk geometry differs from this render; retrace with matching geometry or use a standard cache.")
+    retained_ids = np.flatnonzero(~omitted)
+    print(f"Histories omitted: {np.count_nonzero(omitted)} | Rays to evaluate: {len(retained_ids)}", flush=True)
+
     img = np.full((N, N, 2), np.nan)
     order_map = np.full((N, N), -1, dtype=np.int32)
     hit_map = np.zeros((N, N), dtype=bool)
+    img.reshape(-1, 2)[omitted] = 0.0
 
     evaluate_batch = jax.jit(
         jax.vmap(
@@ -92,11 +103,12 @@ with RayHistoryReader(cache_path) as reader:
         dtype=initial.y.dtype,
     )
 
-    for start in range(0, reader.batch_size, BATCH_SIZE):
-        stop = min(start + BATCH_SIZE, reader.batch_size)
+    for start in range(0, len(retained_ids), BATCH_SIZE):
+        stop = min(start + BATCH_SIZE, len(retained_ids))
         count = stop - start
+        ray_ids = retained_ids[start:stop]
 
-        for j, ray_id in enumerate(range(start, stop)):
+        for j, ray_id in enumerate(ray_ids):
             history, _, _ = reader.read_ray(
                 ray_id, include_initial=True,
             )
@@ -113,7 +125,7 @@ with RayHistoryReader(cache_path) as reader:
             )
         )
 
-        rows, cols = np.divmod(np.arange(start, stop), N)
+        rows, cols = np.divmod(ray_ids, N)
 
         img[rows, cols, 0] = I_values[:count]
         img[rows, cols, 1] = g_values[:count]
@@ -121,9 +133,9 @@ with RayHistoryReader(cache_path) as reader:
         hit_map[rows, cols] = hits[:count]
 
         batch_number = start // BATCH_SIZE + 1
-        if start == 0 or batch_number % 10 == 0 or stop == reader.batch_size:
+        if start == 0 or batch_number % 10 == 0 or stop == len(retained_ids):
             print(
-                f"Rendered {stop}/{reader.batch_size} rays | elapsed {time.perf_counter() - render_started:.1f}s",
+                f"Rendered {stop}/{len(retained_ids)} retained rays | elapsed {time.perf_counter() - render_started:.1f}s",
                 flush=True,
             )
 

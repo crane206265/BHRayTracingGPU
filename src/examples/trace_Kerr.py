@@ -16,7 +16,9 @@ from src.events import event_single_func
 from src.integrators.rk4 import rk4_step_func
 from src.integrators.batched import integrate_chunk_func
 from src.hamiltonian import rhs_func
-from src.cache.writer import RayHistoryWriter
+from src.cache.writer import RayHistoryWriter, SelectiveRayHistoryWriter
+from src.plasma.thin_disk import intersect_thin_disk
+from src.plasma.novikov_thorne import isco_radius_kerr
 from src.integrators.step_size import adaptive_step_size_func
 
 
@@ -38,6 +40,9 @@ parser.add_argument("--step-growth-radius", type=float, default=30.0, help="Kerr
 parser.add_argument("--chunk-steps", type=int, default=256)
 parser.add_argument("--max-chunks", type=int, default=100)
 parser.add_argument("--output", default="rays.h5", help="Filename relative to repository cache/, or an absolute path.")
+parser.add_argument("--cache-history-mode", choices=("standard", "omit_captured_no_hit"), default="standard")
+parser.add_argument("--trace-batch-size", type=int, default=512, help="Maximum rays buffered in CPU RAM in selective cache mode.")
+parser.add_argument("--cache-disk-r-out-m", type=float, default=20.0, help="Selective mode: disk outer radius in units of M; inner radius is ISCO, plane z=0.")
 args = parser.parse_args()
 
 numeric_values = [value for value in vars(args).values() if isinstance(value, (int, float))]
@@ -61,6 +66,16 @@ if args.cache_dense_radius < 0 or args.cache_outer_interval <= 0:
     parser.error("Require cache-dense-radius >= 0 and cache-outer-interval > 0.")
 if args.chunk_steps < 1 or args.max_chunks < 1:
     parser.error("Chunk steps and max chunks must be positive integers.")
+
+if args.trace_batch_size < 1 or args.cache_disk_r_out_m <= 0:
+    parser.error("Trace batch size and selective disk outer radius must be positive.")
+if args.cache_history_mode == "omit_captured_no_hit":
+    omission_r_in = float(isco_radius_kerr(KerrParams(M=args.mass, a=args.spin)))
+    omission_r_out = args.cache_disk_r_out_m * args.mass
+    if not omission_r_out > omission_r_in:
+        parser.error("Selective disk outer radius must exceed the ISCO.")
+    if args.cache_dense_radius < omission_r_out:
+        parser.error("Selective caching requires cache-dense-radius >= the disk outer radius in code units.")
 
 print("Parameters:", vars(args), flush=True)
 
@@ -142,25 +157,65 @@ integrate_chunk = integrate_chunk_func(
 cache_radius_fn = jax.jit(jax.vmap(
     partial(kerr_schild.radial_coordinate, params=BHparams)
 ))
-with RayHistoryWriter(
-    args.output,
+writer_options = dict(
     radius_fn=cache_radius_fn,
     dense_radius=args.cache_dense_radius,
     outer_interval=args.cache_outer_interval,
-) as writer:
+)
+writer_class = RayHistoryWriter
+if args.cache_history_mode == "omit_captured_no_hit":
+    disk_hit_fn = jax.jit(jax.vmap(
+        lambda x0, x1: intersect_thin_disk(x0, x1, BHparams, omission_r_in, omission_r_out)[0]
+    ))
+    writer_class = SelectiveRayHistoryWriter
+    writer_options.update(
+        disk_hit_fn=disk_hit_fn,
+        disk_geometry=dict(
+            plane="z=0", mass=args.mass, spin=args.spin,
+            r_in=omission_r_in, r_out=omission_r_out,
+        ),
+    )
+
+with writer_class(args.output, **writer_options) as writer:
     parameters = writer.file.create_group("parameters")
     for name, value in vars(args).items():
         parameters.attrs[name] = value
     writer.write_initial(init_state)
 
-    final_state = integrate(
-        state=init_state,
-        params=BHparams,
-        h=h,
-        r_escape=r_escape,
-        integrate_chunk=integrate_chunk,
-        max_chunks=MAX_CHUNKS,
-        save_chunk=writer.save_chunk,
-    )
-
-    writer.write_final(final_state)
+    if args.cache_history_mode == "standard":
+        final_state = integrate(
+            state=init_state,
+            params=BHparams,
+            h=h,
+            r_escape=r_escape,
+            integrate_chunk=integrate_chunk,
+            max_chunks=MAX_CHUNKS,
+            save_chunk=writer.save_chunk,
+        )
+        writer.write_final(final_state)
+    else:
+        for start in range(0, B, args.trace_batch_size):
+            stop = min(start + args.trace_batch_size, B)
+            ray_ids = np.arange(start, stop, dtype=np.int64)
+            batch_state = jax.tree_util.tree_map(lambda value: value[start:stop], init_state)
+            with writer.batch(ray_ids, batch_state) as pending:
+                final_state = integrate(
+                    state=batch_state,
+                    params=BHparams,
+                    h=h,
+                    r_escape=r_escape[start:stop],
+                    integrate_chunk=integrate_chunk,
+                    max_chunks=MAX_CHUNKS,
+                    save_chunk=pending.save_chunk,
+                )
+                pending.commit(final_state)
+            print(f"Traced and committed {stop}/{B} rays", flush=True)
+        writer.write_final()
+        omitted = writer.file["history/omitted"][:]
+        unfiltered = int(writer.file["history/unfiltered_saved_length"][:].sum())
+        saved = writer.file["history/y"].shape[0]
+        print(
+            f"Selective cache: {np.count_nonzero(omitted)}/{B} histories omitted"
+            f" | Samples retained: {saved}/{unfiltered}",
+            flush=True,
+        )

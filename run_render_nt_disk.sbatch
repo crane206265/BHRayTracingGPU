@@ -14,13 +14,23 @@ set -eo pipefail
 cd "${SLURM_SUBMIT_DIR:?Submit from the repository root.}"
 test -f src/examples/render_NT_disk.py
 
-CACHE_ID="${1:-${CACHE_ID:-}}"
-if [[ ! "$CACHE_ID" =~ ^[0-9]+$ ]]; then
-    printf 'Usage: sbatch run_render_nt_disk.sbatch CACHE_ID\n' >&2
+CACHE_INPUT="${1:-${CACHE_ID:-}}"
+if [[ -z "$CACHE_INPUT" ]]; then
+    printf 'Usage: sbatch run_render_nt_disk.sbatch CACHE_ID_OR_OUTPUT_FILENAME\n' >&2
     exit 2
 fi
-CACHE_PATH="cache/rays_${CACHE_ID}.h5"
-OUTPUT="${OUTPUT:-cache/render_${CACHE_ID}_${SLURM_JOB_ID}.npz}"
+if [[ "$CACHE_INPUT" =~ ^[0-9]+$ ]]; then
+    CACHE_INPUT="rays_${CACHE_INPUT}.h5"
+fi
+case "$CACHE_INPUT" in
+    /*) CACHE_PATH="$CACHE_INPUT" ;;
+    "~/"*) CACHE_PATH="${HOME}/${CACHE_INPUT:2}" ;;
+    *) CACHE_PATH="cache/$CACHE_INPUT" ;;
+esac
+CACHE_LABEL="${CACHE_PATH##*/}"
+CACHE_LABEL="${CACHE_LABEL%.*}"
+CACHE_LABEL="${CACHE_LABEL#rays_}"
+OUTPUT="${RENDER_OUTPUT:-${OUTPUT:-cache/render_${CACHE_LABEL}_${SLURM_JOB_ID}.npz}}"
 if [[ ! -f "$CACHE_PATH" ]]; then
     printf 'Cache file not found: %s\n' "$CACHE_PATH" >&2
     exit 1
@@ -42,7 +52,7 @@ export MKL_NUM_THREADS="$OMP_NUM_THREADS"
 hostname
 date
 nvidia-smi
-printf 'Cache ID: %s\nCache: %s\nOutput: %s\n' "$CACHE_ID" "$CACHE_PATH" "$OUTPUT"
+printf 'Cache input: %s\nCache: %s\nOutput: %s\n' "$CACHE_INPUT" "$CACHE_PATH" "$OUTPUT"
 python -c "import sys, jax; print(sys.executable); print('JAX:', jax.__version__); print('Devices:', jax.devices())"
 python -u -m src.examples.render_NT_disk \
     --cache="$CACHE_PATH" \

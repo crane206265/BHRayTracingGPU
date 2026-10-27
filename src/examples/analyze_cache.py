@@ -44,6 +44,8 @@ def analyze_cache(path, *, chunk_samples=65536, progress_seconds=10.0, progress=
         initial, final = reader.read_initial(), reader.read_final()
         B = reader.batch_size
         declared = reader.saved_lengths.astype(np.int64)
+        omitted = reader.history_omitted
+        unfiltered = reader.unfiltered_saved_lengths.astype(np.int64)
         initial_steps = initial.valid_length.astype(np.int64)
         final_steps = final.valid_length.astype(np.int64)
         integrated = final_steps - initial_steps
@@ -93,7 +95,7 @@ def analyze_cache(path, *, chunk_samples=65536, progress_seconds=10.0, progress=
                 progress(f"Scanned {scanned:,} saved samples in {time.perf_counter() - start_time:.1f}s")
                 next_progress = time.perf_counter() + progress_seconds
 
-        if reader.format_version == 2:
+        if reader.format_version >= 2:
             offsets_dataset = history["block_offsets"]
             for block in range(offsets_dataset.shape[0]):
                 offsets = offsets_dataset[block]
@@ -123,7 +125,7 @@ def analyze_cache(path, *, chunk_samples=65536, progress_seconds=10.0, progress=
                 accepted += valid.sum(axis=0, dtype=np.int64)
 
         endpoint_ok = np.ones(B, dtype=bool)
-        has_steps = integrated > 0
+        has_steps = (integrated > 0) & ~omitted
         endpoint_ok[has_steps] = (
             (counts[has_steps] > 0)
             & (last_steps[has_steps] == final_steps[has_steps])
@@ -139,6 +141,8 @@ def analyze_cache(path, *, chunk_samples=65536, progress_seconds=10.0, progress=
             "step_indices_in_range": bool(bounds_ok.all()),
             "endpoints_match": bool(endpoint_ok.all()),
             "saved_not_more_than_integrated": bool(limits_ok.all()),
+            "omitted_histories_empty": bool(np.all(counts[omitted] == 0)),
+            "omitted_rays_captured": bool(np.all(final.status[omitted] == 1)),
             "final_states_finite": bool(np.isfinite(final.y).all() and np.isfinite(final.lam).all()),
             "no_remaining_active": bool(not np.any(final.active)),
             "known_statuses": bool(np.isin(final.status, list(STATUS_NAMES)).all()),
@@ -146,6 +150,11 @@ def analyze_cache(path, *, chunk_samples=65536, progress_seconds=10.0, progress=
         }
         status_counts = {STATUS_NAMES.get(int(c), str(c)): int(n) for c, n in zip(*np.unique(final.status, return_counts=True))}
         params = dict(reader.file["parameters"].attrs) if "parameters" in reader.file else {}
+        representative_omitted = bool(omitted[representative])
+        if representative_omitted:
+            center_y = [np.stack((initial.y[representative], final.y[representative]))]
+            center_lam = [np.array([initial.lam[representative], final.lam[representative]])]
+            center_steps = [np.array([initial_steps[representative], final_steps[representative]])]
         y = np.concatenate(center_y)
         lam = np.concatenate(center_lam)
         steps = np.concatenate(center_steps)
@@ -168,12 +177,14 @@ def analyze_cache(path, *, chunk_samples=65536, progress_seconds=10.0, progress=
             "saved_delta_lambda": float(lam[i] - lam[i - 1]) if i else 0.0,
             "radius": float(radius[i]), "max_abs_momentum": float(np.max(np.abs(y[i, 4:]))),
         } for i in indices]
+        if representative_omitted:
+            samples = []
         representative_report = {
-            "ray_id": representative,
+            "ray_id": representative, "history_omitted": representative_omitted,
             "selection": "nearest center pixel (no exact center for an even image width)" if side * side == B else "middle ray index",
             "status": STATUS_NAMES.get(int(final.status[representative]), str(final.status[representative])),
             "radius_kind": radius_kind, "horizon": horizon, "capture_boundary": capture_boundary,
-            "minimum_radius": float(np.min(radius)), "final_radius": float(radius[-1]),
+            "minimum_radius": None if representative_omitted else float(np.min(radius)), "final_radius": float(radius[-1]),
             "final_lambda": float(lam[-1]), "samples": samples,
         }
         raw_dense_bytes = reader.n_steps * B * (8 * history["y"].dtype.itemsize + history["lam"].dtype.itemsize + 1)
@@ -183,6 +194,12 @@ def analyze_cache(path, *, chunk_samples=65536, progress_seconds=10.0, progress=
             "file_size_bytes": Path(path).stat().st_size, "parameters": params,
             "batch_size": B, "scan_steps": reader.n_steps, "saved_samples": scanned,
             "saved_lengths": counts, "integrated_lengths": integrated,
+            "omitted_histories": int(np.count_nonzero(omitted)),
+            "unfiltered_saved_samples": int(unfiltered.sum()),
+            "omitted_samples": int(unfiltered[omitted].sum()),
+            "estimated_omitted_sample_bytes": int(unfiltered[omitted].sum()) * (
+                8 * history["y"].dtype.itemsize + history["lam"].dtype.itemsize + 8
+            ),
             "saved_length_summary": length_summary(counts), "integrated_length_summary": length_summary(integrated),
             "estimated_dense_history_bytes": raw_dense_bytes,
             "status_counts": status_counts, "remaining_active": int(np.count_nonzero(final.active)),
@@ -205,6 +222,9 @@ def format_report(report):
         f"Cache: {report['cache_path']}", f"Format: {report['format_version']}",
         f"File size (MB): {report['file_size_bytes'] / 1e6:.3f}",
         f"Rays: {report['batch_size']}", f"Saved samples: {report['saved_samples']:,}",
+        f"Histories omitted: {report['omitted_histories']}",
+        f"Samples before omission: {report['unfiltered_saved_samples']:,}",
+        f"Samples omitted: {report['omitted_samples']:,} (~{report['estimated_omitted_sample_bytes'] / 1e6:.3f} MB payload)",
         f"Saved lengths: {report['saved_length_summary']}",
         f"Integrated lengths: {report['integrated_length_summary']}",
         f"Parameters: {json.dumps(report['parameters'], ensure_ascii=False, sort_keys=True)}",
@@ -218,6 +238,7 @@ def format_report(report):
         f"All checks passed: {report['all_checks_passed']}",
         f"Remaining active: {report['remaining_active']}", "",
         f"Representative ray: {ray['ray_id']} ({ray['selection']}) {ray['status']}",
+        f"Representative history omitted: {ray['history_omitted']}",
         f"Radius kind: {ray['radius_kind']}",
         f"Horizon: {ray['horizon']}  Capture boundary: {ray['capture_boundary']}",
         f"Minimum/final radius: {ray['minimum_radius']} / {ray['final_radius']}",
