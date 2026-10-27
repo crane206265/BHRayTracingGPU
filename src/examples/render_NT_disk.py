@@ -17,6 +17,7 @@ from src.metrics import kerr_schild
 from src.plasma.novikov_thorne import isco_radius_kerr
 from src.observables import evaluate_nt_ray
 from src.cache.reader import RayHistoryReader
+from src.examples.plot_NT_disk import plot_nt_disk
 
 
 parser = argparse.ArgumentParser(description="Render a bolometric NT disk image from a saved ray cache.")
@@ -78,7 +79,7 @@ with RayHistoryReader(cache_path) as reader:
         )
     )
 
-    BATCH_SIZE = 32
+    BATCH_SIZE = 512
     T = max(2, int(reader.saved_lengths.max()) + 1)
     print(
         f"Image: {N}x{N} | Rays: {reader.batch_size} | Batch size: {BATCH_SIZE} | Padded length: {T}",
@@ -134,6 +135,8 @@ with RayHistoryReader(cache_path) as reader:
         image_order=order_map,
         found=hit_map,
     )
+    figure_path = plot_nt_disk(output_path)
+    print(f"Figure saved: {figure_path}", flush=True)
     print(
         f"Saved: {output_path} | Disk hits: {np.count_nonzero(hit_map)}/{reader.batch_size}"
         f" | Total elapsed: {time.perf_counter() - render_started:.1f}s",
