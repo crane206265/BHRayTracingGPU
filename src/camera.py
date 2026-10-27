@@ -17,7 +17,6 @@ class KerrSchildCamera:
             self.x_obs[2]
         ])
         self.N = int(FOV * PPD)
-        self.img = jnp.full((self.N, self.N, 2), jnp.nan)
 
     def eulerian_tetrad(x, params, metric_cov):
         """

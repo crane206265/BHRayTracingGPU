@@ -2,6 +2,9 @@
 !/.gitignore
 !/.gitattributes
 !/run_trace_kerr.sbatch
+!/run_render_nt_disk.sbatch
+!/run_analyze_cache.sbatch
+!/submit_trace_and_analysis.sh
 !/README.md
 !/pyproject.toml
 !/requirements*.txt
