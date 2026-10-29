@@ -156,3 +156,7 @@ def observed_bolometric_intensity(flux_em, g):
     I_em = flux_em/PI
     I_obs = (g**4) * I_em
     return I_obs
+
+
+# transfer.py
+# Volume GRRT along ray histories using local emission and absorption coefficients
